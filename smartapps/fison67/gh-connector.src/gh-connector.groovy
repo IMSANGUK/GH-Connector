@@ -1,5 +1,5 @@
 /**
- *  GH Connector (v.0.0.1)
+ *  GH Connector (v.0.0.10)
  *
  * MIT License
  *
@@ -48,14 +48,13 @@ preferences {
    page(name: "langPage")
 }
 
-
 def mainPage() {
-	def languageList = ["English", "Korean"]
-    dynamicPage(name: "mainPage", title: "GH Connector", nextPage: null, uninstall: true, install: true) {
+	 dynamicPage(name: "mainPage", title: "GH Connector", nextPage: null, uninstall: true, install: true) {
    		section("Request New Devices"){
-        	input "address", "string", title: "Server address", required: true
-            input(name: "selectedLang", title:"Select a language" , type: "enum", required: true, options: languageList, defaultValue: "English", description:"Language for DTH")
-        	href url:"http://${settings.address}", style:"embedded", required:false, title:"Management", description:"This makes you easy to setup"
+        	input "address", "text", title: "Server address", required: true
+        	input "address2", "text", title: "Port forwarding Server address", required: false
+        	href url:"http://${settings.address}", style:"embedded", required:false, title:"Local Management", description:"This makes you easy to setup"
+        	href url:"http://${settings.address2}", style:"embedded", required:false, title:"External Management", description:"This makes you easy to setup"
         }
         
        	section() {
@@ -65,12 +64,8 @@ def mainPage() {
     }
 }
 
-def langPage(){
-	dynamicPage(name: "langPage", title:"Select a Language") {
-    	section ("Select") {
-        	input "Korean",  title: "Korean", multiple: false, required: false
-        }
-    }
+def _getServerURL(){
+     return settings.address
 }
 
 def installed() {
@@ -90,45 +85,8 @@ def updated() {
 //    unsubscribe()
     // Subscribe to stuff
     initialize()
-}
-
-def addMonitorDevice(target, remoteDevice, attr, data){
-	log.debug "IR Mapping >> " + target.deviceNetworkId + " >> Target(" + state.selectedDeviceNetworkID + ") Attr >> " + attr
-	// Init
-	if(state.monitorMap == null){
-    	state.monitorMap = [:]
-    }
-    // Add
-    def item = [:]
-    item['id'] = target.deviceNetworkId
-    item['data'] = data
-    state.monitorMap[remoteDevice] = item
-    
-    log.debug state.monitorMap
-    
-    unsubscribe(target)
-    subscribe(target, attr, stateChangeHandler)
-}
-
-def stateChangeHandler(event){
-    def deviceNetworkID = event.getDevice().deviceNetworkId
-    setStateRemoteDevice(event.name, event.value, getDeviceToNotifyList(deviceNetworkID) )
-}
-
-def setStateRemoteDevice(eventName, eventValue, list){
-	log.debug "setStateRemoteDevice >> " + eventName + " [" + eventValue + "]"
-	for(item in list){
-        def targetRemoteDevice = getChildDevice(item.id)
-        if(targetRemoteDevice){
-            if(eventName == "contact"){
-                targetRemoteDevice.setStatus( eventValue == "open" ? (item.data.default == "open" ? "on" : "off") : (item.data.default == "open" ? "off" : "on") )
-            }else if(eventName == "power"){
-            	targetRemoteDevice.setStatus( (item.data.min <= Float.parseFloat(eventValue) && Float.parseFloat(eventValue) <= item.data.max) ? "on" : "off" )
-            }else if(eventName == "presence"){
-            	targetRemoteDevice.setStatus( eventValue == "present" ? "on" : "off" )
-            }
-        }
-    }
+    initEvent()
+    setAPIAddress()
 }
 
 /**
@@ -147,6 +105,26 @@ def getDeviceToNotifyList(deviceNetworkID){
     return list
 }
 
+def setAPIAddress(){
+	def list = getChildDevices()
+    list.each { child ->
+        try{
+            child.setAddress(settings.address)
+        }catch(e){
+        }
+    }
+}
+
+def initEvent(){
+    def list = getChildDevices()
+    list.each { child ->
+        try{
+            child.initEvent()
+        }catch(e){
+        }
+    }
+}
+
 def updateLanguage(){
     log.debug "Languge >> ${settings.selectedLang}"
     def list = getChildDevices()
@@ -159,24 +137,12 @@ def updateLanguage(){
     }
 }
 
-def updateExternalNetwork(){
-	log.debug "External Network >> ${settings.externalAddress}"
-    def list = getChildDevices()
-    list.each { child ->
-        try{
-        	child.setExternalAddress(settings.externalAddress)
-        }catch(e){
-        	log.error "DTH is not supported to select external address"
-        }
-    }
-}
-
 def initialize() {
 	log.debug "initialize"
     
     def options = [
      	"method": "POST",
-        "path": "/settings/smartthings",
+        "path": "/settings/api/smartthings",
         "headers": [
         	"HOST": settings.address,
             "Content-Type": "application/json"
@@ -187,12 +153,11 @@ def initialize() {
             "access_token":state.accessToken
         ]
     ]
-    log.debug options
+    
     def myhubAction = new physicalgraph.device.HubAction(options, null, [callback: null])
     sendHubCommand(myhubAction)
     
-    updateLanguage()
-    updateExternalNetwork()
+//    updateLanguage()
 }
 
 def dataCallback(physicalgraph.device.HubResponse hubResponse) {
@@ -202,7 +167,7 @@ def dataCallback(physicalgraph.device.HubResponse hubResponse) {
         status = msg.status
         json = msg.json
         log.debug "${json}"
-        state.latestHttpResponse = status
+    //    state.latestHttpResponse = status
     } catch (e) {
         logger('warn', "Exception caught while parsing data: "+e);
     }
@@ -221,40 +186,107 @@ def getDataList(){
     sendHubCommand(myhubAction)
 }
 
-def addDevice(){
-	def id = params.id
-    def targetAddress = params.address
-    def googleHomeName = params.name
+def addVirtualDevice(){
+    def data = request.JSON
+	def id = data.id
+    def name = data.name
+    def list = data.list
     
-    log.debug("Try >> ADD GoogleHome Device id=${id} name=${googleHomeName}")
+    log.debug("Try >> ADD GoogleHome PlayList id=${id} name=${name}")
 	
-    def dni = "gh-connector-" + id.toLowerCase()
-    log.debug("DNI >> " + dni)
-    def chlid = getChildDevice(dni)
-    if(!child){
-        def dth = "Google Home";
-        def name = id;
+    def dni = "gh-connector-playlist-" + new Date().getTime(); 
+    def dth = "Google Home PlayList";
+
+    def childDevice = addChildDevice("fison67", dth, dni, location.hubs[0].id, [
+        "label": name
+    ])    
+    childDevice.setInfo(settings.address, id, list)
+    log.debug "Success >> ADD PlayList DNI=${dni} ${name}"
+
+    def resultString = new groovy.json.JsonOutput().toJson("result":"ok")
+    render contentType: "application/javascript", data: resultString
+
+}
+
+def addDevice(){
+    def data = request.JSON
+    log.debug data
+	def id = data.id
+    if(id.contains("calendar-")){
+    	log.debug("Try >> ADD Calendar id=${id} name=${googleName}")
+        def dni = "gh-connector-" + id.toLowerCase()
+		def child = childDevices.find { it.deviceNetworkId == dni }
+        if(!child){
+            def dth = "Google Calendar";
+            def childDevice = addChildDevice("fison67", dth, dni, location.hubs[0].id, [
+                "label": data.name_ko
+            ])    
+            log.debug "Success >> ADD Device DNI=${dni} ${data.name_ko}"
+
+            def resultString = new groovy.json.JsonOutput().toJson("result":"ok")
+            render contentType: "application/javascript", data: resultString
+        }else{
+            def resultString = new groovy.json.JsonOutput().toJson("result":"exist")
+            render contentType: "application/javascript", data: resultString
+        }
         
-        def childDevice = addChildDevice("fison67", dth, dni, location.hubs[0].id, [
-            "label": googleHomeName
-        ])    
-        childDevice.setInfo(settings.address, id, targetAddress)
-        log.debug "Success >> ADD Device DNI=${dni} ${googleHomeName}"
+    }else if(id.contains("assistant-")){
+    	log.debug "Add Assistant"
+        def dni = "gh-connector-" + id.toLowerCase()
+        log.debug "DNI >> " + dni
+		def child = childDevices.find { it.deviceNetworkId == dni }
+        log.debug child
+        if(!child){
+            def dth = "Google Assistant";
+            def childDevice = addChildDevice("fison67", dth, dni, location.hubs[0].id, [
+                "label": "Google Assistant " + data.name
+            ])    
+            childDevice.setInfo(settings.address, id, data.address)
+            log.debug "Success >> ADD Device DNI=${dni} ${data.name}"
 
-        try{ childDevice.setLanguage(settings.selectedLang) }catch(e){}
+            def resultString = new groovy.json.JsonOutput().toJson("result":"ok")
+            render contentType: "application/javascript", data: resultString
+        }else{
+            def resultString = new groovy.json.JsonOutput().toJson("result":"exist")
+            render contentType: "application/javascript", data: resultString
+        }
+        
+    }else{
+        def targetAddress = data.address
+        def googleName = data.name
+        log.debug("Try >> ADD GoogleHome Device id=${id} name=${googleName}")
+        def dni = "gh-connector-" + id.toLowerCase()
+		def child = childDevices.find { it.deviceNetworkId == dni }
+        if(!child){
+            def dth = "Google Home";
+            def name = id;
 
-        def resultString = new groovy.json.JsonOutput().toJson("result":"ok")
-        render contentType: "application/javascript", data: resultString
+            def childDevice = addChildDevice("fison67", dth, dni, location.hubs[0].id, [
+                "label": googleName
+            ])    
+            childDevice.setInfo(settings.address, id, targetAddress)
+            log.debug "Success >> ADD Device DNI=${dni} ${googleName}"
+
+            try{ childDevice.setLanguage(settings.selectedLang) }catch(e){}
+
+            def resultString = new groovy.json.JsonOutput().toJson("result":"ok")
+            render contentType: "application/javascript", data: resultString
+        }else{
+            def resultString = new groovy.json.JsonOutput().toJson("result":"exist")
+            render contentType: "application/javascript", data: resultString
+        }
     }
+    
+    
 }
 
 def updateDevice(){
-    def id = params.id
-    log.debug " ID >> " + id
+    def data = request.JSON
+    def id = data.id
     def dni = "gh-connector-" + id.toLowerCase()
     def chlid = getChildDevice(dni)
     if(chlid){
-		chlid.setStatus(params)
+        chlid.setStatus(data)
     }
     def resultString = new groovy.json.JsonOutput().toJson("result":true)
     render contentType: "application/javascript", data: resultString
@@ -283,7 +315,6 @@ def deleteDevice(){
 }
 
 def getDeviceList(){
-	log.debug "getDeviceList"
 	def list = getChildDevices();
     def resultList = [];
     list.each { child ->
@@ -300,6 +331,11 @@ def authError() {
     [error: "Permission denied"]
 }
 
+def auth(){
+    def configString = new groovy.json.JsonOutput().toJson("list":{})
+    render contentType: "application/javascript", data: configString
+}
+
 def renderConfig() {
     def configJson = new groovy.json.JsonOutput().toJson([
         description: "GH Connector API",
@@ -309,7 +345,11 @@ def renderConfig() {
                 name: "GH Connector",
                 app_url: apiServerUrl("/api/smartapps/installations/"),
                 app_id: app.id,
-                access_token:  state.accessToken
+                access_token:  state.accessToken,
+                calendar: [
+                	authorized_javaScript_origins: apiServerUrl(""),
+                    authorized_redirect_uris: apiServerUrl("/api/smartapps/installations/") + app.id + "/auth"
+                ]
             ]
         ],
     ])
@@ -324,13 +364,17 @@ mappings {
         path("/list")                         	{ action: [GET: "authError"]  }
         path("/update")                         { action: [POST: "authError"]  }
         path("/add")                         	{ action: [POST: "authError"]  }
+        path("/addVirtual")                     { action: [POST: "authError"]  }
         path("/delete")                         { action: [POST: "authError"]  }
+        path("/auth")                         	{ action: [GET: "auth"]  }
 
     } else {
         path("/config")                         { action: [GET: "renderConfig"]  }
         path("/list")                         	{ action: [GET: "getDeviceList"]  }
         path("/update")                         { action: [POST: "updateDevice"]  }
         path("/add")                         	{ action: [POST: "addDevice"]  }
+        path("/addVirtual")                     { action: [POST: "addVirtualDevice"]  }
         path("/delete")                         { action: [POST: "deleteDevice"]  }
+        path("/auth")                         	{ action: [GET: "auth"]  }
     }
 }
